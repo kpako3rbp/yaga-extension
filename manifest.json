@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Jaga Comments Toggle",
-  "version": "1.1.0",
-  "description": "Показывает и скрывает блок комментариев на jaga.rt.ru.",
+  "version": "1.2.0",
+  "description": "Управляет блоком комментариев и сохраняет черновики описания задач на jaga.rt.ru.",
   "permissions": ["storage"],
   "icons": {
     "16": "icons/icon16.png",
@@ -14,6 +14,11 @@
     {
       "matches": ["https://jaga.rt.ru/browse/*"],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://jaga.rt.ru/*"],
+      "js": ["drafts.js"],
       "run_at": "document_idle"
     }
   ]
