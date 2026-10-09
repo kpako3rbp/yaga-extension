@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Jaga Comments Toggle",
-  "version": "1.1.0",
-  "description": "Показывает и скрывает блок комментариев на jaga.rt.ru.",
+  "version": "1.3.2",
+  "description": "Управляет отображением комментариев и экспериментальным сохранением черновиков описания задач на jaga.rt.ru.",
   "permissions": ["storage"],
   "icons": {
     "16": "icons/icon16.png",
@@ -10,10 +10,25 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
+  "action": {
+    "default_title": "Настройки Jaga Extension",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
   "content_scripts": [
     {
       "matches": ["https://jaga.rt.ru/browse/*"],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://jaga.rt.ru/*"],
+      "js": ["drafts.js"],
       "run_at": "document_idle"
     }
   ]
