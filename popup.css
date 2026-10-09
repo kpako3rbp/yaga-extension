@@ -1,0 +1,140 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #fff;
+  color: rgba(16, 24, 40, 1);
+  font-family: Inter, Arial, sans-serif;
+}
+
+body {
+  width: 360px;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.popup {
+  padding: 18px;
+}
+
+.popup__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.popup__logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+}
+
+.popup__header h1 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.popup__header p {
+  margin: 2px 0 0;
+  color: rgba(131, 137, 151, 1);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.setting {
+  padding: 14px;
+  border: 1px solid rgba(225, 227, 232, 1);
+  border-radius: 10px;
+  background: rgba(249, 250, 251, 1);
+}
+
+.setting__row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.setting__text {
+  min-width: 0;
+}
+
+.setting__text label {
+  display: block;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.setting__text span {
+  color: rgba(131, 137, 151, 1);
+  font-weight: 500;
+}
+
+.setting__description {
+  margin: 10px 0 0;
+  color: rgba(68, 83, 113, 1);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 22px;
+  cursor: pointer;
+}
+
+.switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch__control {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: rgba(181, 185, 195, 1);
+  transition: background 0.15s ease;
+}
+
+.switch__control::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.2);
+  transition: transform 0.15s ease;
+}
+
+.switch input:checked + .switch__control {
+  background: rgba(0, 66, 237, 1);
+}
+
+.switch input:checked + .switch__control::after {
+  transform: translateX(16px);
+}
+
+.switch input:focus-visible + .switch__control {
+  outline: 2px solid rgba(65, 129, 255, 0.35);
+  outline-offset: 2px;
+}
