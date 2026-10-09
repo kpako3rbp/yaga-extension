@@ -1,8 +1,9 @@
 (() => {
   const DRAFTS_STORAGE_KEY = 'jagaDescriptionDrafts';
+  const DRAFTS_ENABLED_STORAGE_KEY = 'jagaDescriptionDraftsEnabled';
   const NEW_TASK_SESSION_KEY = 'jagaNewTaskDraftId';
   const MAX_DRAFTS = 5;
-  const SAVE_DELAY = 500;
+  const SAVE_DELAY = 300;
 
   const ATTRIBUTE_WRAPPER_SELECTOR = '[data-class="AttributeWrapper_wrapper"]';
   const ATTRIBUTE_LABEL_SELECTOR = '[data-class="AttributeLabel_title"]';
@@ -13,10 +14,12 @@
   const NOTICE_ID = 'jaga-description-draft-notice';
   const STYLE_ID = 'jaga-description-draft-styles';
 
+  let draftsEnabled = false;
   let observedEditor = null;
   let observedEditorField = null;
   let inputHandler = null;
   let editorFieldClickHandler = null;
+  let editorMutationObserver = null;
   let saveTimer = null;
   let currentDraftKey = null;
   let lastPathname = location.pathname;
@@ -121,16 +124,10 @@
   };
 
   const saveDraft = async (editor) => {
+    if (!draftsEnabled) return;
+
     const identity = getDraftIdentity();
     if (!identity || !editor?.isConnected) return;
-
-    const html = editor.innerHTML;
-    const text = editor.textContent?.trim() ?? '';
-
-    if (!text && !html.replace(/<[^>]+>/g, '').trim()) {
-      await removeDraft(identity.key);
-      return;
-    }
 
     const drafts = await getDrafts();
     const nextDraft = {
@@ -139,8 +136,8 @@
       isNew: identity.isNew,
       title: getTaskTitle(),
       url: location.href,
-      html,
-      text,
+      html: editor.innerHTML,
+      text: editor.textContent?.trim() ?? '',
       updatedAt: Date.now(),
     };
 
@@ -149,17 +146,25 @@
   };
 
   const scheduleSave = (editor) => {
+    if (!draftsEnabled) return;
+
     window.clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => saveDraft(editor), SAVE_DELAY);
   };
 
-  const formatDraftTime = (timestamp) =>
-    new Intl.DateTimeFormat('ru-RU', {
-      day: '2-digit',
-      month: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(new Date(timestamp));
+  const formatDraftTime = (timestamp) => {
+    const date = new Date(timestamp);
+    const months = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+
+    return `${date.getDate()} ${months[date.getMonth()]} в ${hours}:${minutes}`;
+  };
+
+  const getDraftHeading = (draft) =>
+    draft.isNew
+      ? 'Найден черновик описания для новой задачи'
+      : `Найден черновик описания для задачи ${draft.taskKey}`;
 
   const positionNotice = () => {
     const notice = document.getElementById(NOTICE_ID);
@@ -168,8 +173,8 @@
     const rect = noticeAnchor.getBoundingClientRect();
     const gap = 8;
     const viewportPadding = 12;
-    const preferredWidth = Math.min(420, Math.max(320, rect.width));
-    const width = Math.min(preferredWidth, window.innerWidth - viewportPadding * 2);
+    const maxWidth = Math.min(420, window.innerWidth - viewportPadding * 2);
+    const width = Math.max(260, Math.min(maxWidth, Math.max(rect.width, 320)));
 
     let left = rect.left;
     if (left + width > window.innerWidth - viewportPadding) {
@@ -177,9 +182,16 @@
     }
     left = Math.max(viewportPadding, left);
 
+    let top = rect.bottom + gap;
+    const noticeHeight = notice.offsetHeight;
+
+    if (top + noticeHeight > window.innerHeight - viewportPadding) {
+      top = Math.max(viewportPadding, rect.top - noticeHeight - gap);
+    }
+
     notice.style.width = `${width}px`;
     notice.style.left = `${left}px`;
-    notice.style.top = `${rect.bottom + gap}px`;
+    notice.style.top = `${top}px`;
   };
 
   const removeNotice = () => {
@@ -253,22 +265,22 @@
   };
 
   const showRecoveryNotice = (draft, anchor) => {
-    if (document.getElementById(NOTICE_ID) || !document.body) return;
+    if (!draftsEnabled || document.getElementById(NOTICE_ID) || !document.body) return;
 
     const notice = document.createElement('div');
     notice.id = NOTICE_ID;
     notice.innerHTML = `
       <div class="jaga-draft__content">
-        <strong>Найден черновик описания</strong>
-        <span>Сохранён ${escapeHtml(formatDraftTime(draft.updatedAt))}</span>
+        <strong>${escapeHtml(getDraftHeading(draft))}</strong>
+        <span>Сохранен ${escapeHtml(formatDraftTime(draft.updatedAt))}</span>
       </div>
       <div class="jaga-draft__actions">
-        <button type="button" data-action="restore">Восстановить</button>
-        <button type="button" data-action="remove">Удалить</button>
+        <button type="button" data-action="restore">Восстановить описание</button>
+        <button type="button" data-action="remove">Удалить черновик</button>
       </div>
     `;
 
-    notice.addEventListener('mousedown', (event) => {
+    notice.addEventListener('pointerdown', (event) => {
       event.preventDefault();
     });
 
@@ -295,6 +307,8 @@
   };
 
   const checkForRecoverableDraft = async () => {
+    if (!draftsEnabled) return;
+
     const editorField = getDescriptionEditorField();
     const editor = getDescriptionEditor();
     const identity = getDraftIdentity();
@@ -318,7 +332,30 @@
     showRecoveryNotice(draft, editorField);
   };
 
+  const unbindEditor = () => {
+    window.clearTimeout(saveTimer);
+    saveTimer = null;
+    removeNotice();
+
+    if (observedEditor && inputHandler) {
+      observedEditor.removeEventListener('input', inputHandler);
+    }
+
+    if (observedEditorField && editorFieldClickHandler) {
+      observedEditorField.removeEventListener('click', editorFieldClickHandler, true);
+    }
+
+    editorMutationObserver?.disconnect();
+    editorMutationObserver = null;
+    observedEditor = null;
+    observedEditorField = null;
+    inputHandler = null;
+    editorFieldClickHandler = null;
+  };
+
   const bindEditor = () => {
+    if (!draftsEnabled) return;
+
     const editorField = getDescriptionEditorField();
     const editor = getDescriptionEditor();
 
@@ -354,6 +391,8 @@
       observedEditor.removeEventListener('input', inputHandler);
     }
 
+    editorMutationObserver?.disconnect();
+    editorMutationObserver = null;
     observedEditor = editor;
     inputHandler = null;
 
@@ -361,6 +400,13 @@
 
     inputHandler = () => scheduleSave(editor);
     editor.addEventListener('input', inputHandler);
+
+    editorMutationObserver = new MutationObserver(() => scheduleSave(editor));
+    editorMutationObserver.observe(editor, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
   };
 
   const handleRouteChange = async () => {
@@ -384,6 +430,16 @@
     bindEditor();
   };
 
+  const setDraftsEnabled = (enabled) => {
+    draftsEnabled = Boolean(enabled);
+
+    if (draftsEnabled) {
+      bindEditor();
+    } else {
+      unbindEditor();
+    }
+  };
+
   const injectStyles = () => {
     if (document.getElementById(STYLE_ID)) return;
 
@@ -393,14 +449,13 @@
       #${NOTICE_ID} {
         position: fixed;
         z-index: 1000000;
-        padding: 12px;
+        padding: 16px;
         display: flex;
-        align-items: center;
-        justify-content: space-between;
+        flex-direction: column;
         gap: 12px;
-        background: rgba(249, 250, 251, 1);
+        background: #fff;
         border: 1px solid rgba(208, 212, 220, 1);
-        border-radius: 8px;
+        border-radius: 10px;
         box-sizing: border-box;
         color: rgba(16, 24, 40, 1);
         box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
@@ -417,7 +472,11 @@
       }
 
       #${NOTICE_ID} .jaga-draft__content strong {
-        white-space: nowrap;
+        display: block;
+        font-size: 14px;
+        line-height: 18px;
+        font-weight: 600;
+        overflow-wrap: anywhere;
       }
 
       #${NOTICE_ID} .jaga-draft__content span {
@@ -425,18 +484,26 @@
       }
 
       #${NOTICE_ID} .jaga-draft__actions {
-        flex-shrink: 0;
-        display: flex;
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
         gap: 8px;
       }
 
       #${NOTICE_ID} button {
-        min-height: 32px;
-        padding: 0 12px;
+        min-width: 0;
+        min-height: 36px;
+        padding: 7px 10px;
         border: 0;
         border-radius: 6px;
         cursor: pointer;
         font: inherit;
+        line-height: 16px;
+        transition: opacity 0.15s ease;
+      }
+
+      #${NOTICE_ID} button:hover {
+        opacity: 0.82;
       }
 
       #${NOTICE_ID} button[data-action="restore"] {
@@ -445,7 +512,7 @@
       }
 
       #${NOTICE_ID} button[data-action="remove"] {
-        background: rgba(243, 244, 247, 1);
+        background: rgb(255 204 204);
         color: rgba(16, 24, 40, 1);
       }
     `;
@@ -454,7 +521,13 @@
   };
 
   injectStyles();
-  bindEditor();
+
+  storageGet(DRAFTS_ENABLED_STORAGE_KEY, false).then(setDraftsEnabled);
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !changes[DRAFTS_ENABLED_STORAGE_KEY]) return;
+    setDraftsEnabled(Boolean(changes[DRAFTS_ENABLED_STORAGE_KEY].newValue));
+  });
 
   const observer = new MutationObserver(() => {
     handleRouteChange();
