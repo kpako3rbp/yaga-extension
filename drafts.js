@@ -68,36 +68,44 @@
     return linkMatch?.[1] ?? null;
   };
 
-  const isNewTaskContext = () => {
-    if (getTaskCode()) return false;
+  const isVisible = (element) => {
+    if (!element?.isConnected || element.getClientRects().length === 0) return false;
 
-    const params = new URLSearchParams(location.search);
-    const modal = params.get('modal')?.toLowerCase() ?? '';
-
-    // В Яге создание задачи открывается отдельной task-модалкой.
-    // Считаем форму новой задачей только при явном create/new-маркере,
-    // а не просто потому, что в URL отсутствует taskCode.
-    if (/create.*task|task.*create|new.*task|task.*new/.test(modal)) return true;
-
-    return /^\/(?:create-task|new-task)(?:\/|$)/i.test(location.pathname);
+    const styles = window.getComputedStyle(element);
+    return styles.display !== 'none' && styles.visibility !== 'hidden';
   };
+
+  const getDescriptionWrapper = () => {
+    const wrappers = Array.from(document.querySelectorAll(ATTRIBUTE_WRAPPER_SELECTOR)).filter(
+      (wrapper) => wrapper.querySelector(ATTRIBUTE_LABEL_SELECTOR)?.textContent?.trim() === 'Описание',
+    );
+
+    return wrappers.find(isVisible) ?? null;
+  };
+
+  const getDescriptionEditorField = () =>
+    getDescriptionWrapper()?.querySelector(EDITOR_FIELD_SELECTOR) ?? null;
+
+  const getDescriptionEditor = () =>
+    getDescriptionWrapper()?.querySelector(EDITOR_SELECTOR) ?? null;
 
   const getDraftIdentity = () => {
     const taskCode = getTaskCode();
+    const projectId = getProjectId();
 
     if (taskCode) {
       return {
         key: `task:${taskCode}`,
         taskKey: taskCode,
-        projectId: getProjectId(),
+        projectId,
         isNew: false,
       };
     }
 
-    if (!isNewTaskContext()) return null;
-
-    const projectId = getProjectId();
-    if (!projectId) return null;
+    // Новая задача в Яге может открываться на обычном URL канбана без query-параметров.
+    // Поэтому отсутствие taskCode само по себе недостаточно. Новым считаем только контекст,
+    // в котором реально присутствует видимая форма задачи с полем «Описание».
+    if (!projectId || !getDescriptionEditorField()) return null;
 
     return {
       key: `new:${projectId}`,
@@ -106,21 +114,6 @@
       isNew: true,
     };
   };
-
-  const getDescriptionWrapper = () => {
-    const wrappers = document.querySelectorAll(ATTRIBUTE_WRAPPER_SELECTOR);
-
-    return Array.from(wrappers).find((wrapper) => {
-      const label = wrapper.querySelector(ATTRIBUTE_LABEL_SELECTOR);
-      return label?.textContent?.trim() === 'Описание';
-    });
-  };
-
-  const getDescriptionEditorField = () =>
-    getDescriptionWrapper()?.querySelector(EDITOR_FIELD_SELECTOR) ?? null;
-
-  const getDescriptionEditor = () =>
-    getDescriptionWrapper()?.querySelector(EDITOR_SELECTOR) ?? null;
 
   const getDrafts = async () => {
     const drafts = await storageGet(DRAFTS_STORAGE_KEY, []);
@@ -138,6 +131,7 @@
 
   const removeDraft = async (key) => {
     if (!key) return;
+
     const drafts = await getDrafts();
     await setDrafts(drafts.filter((draft) => draft.key !== key));
   };
@@ -254,12 +248,21 @@
     return true;
   };
 
+  const isDraftForIdentity = (draft, identity) => {
+    if (!draft || !identity || draft.key !== identity.key) return false;
+
+    if (identity.isNew) {
+      return draft.isNew === true && draft.projectId === identity.projectId;
+    }
+
+    return draft.isNew === false && draft.taskKey === identity.taskKey;
+  };
+
   const restoreDraft = (draft) => {
     const identity = getDraftIdentity();
     const editor = getDescriptionEditor();
 
-    // Последняя защита от вставки черновика другой задачи.
-    if (!identity || draft.key !== identity.key || !editor) {
+    if (!identity || !isDraftForIdentity(draft, identity) || !editor) {
       removeNotice();
       return;
     }
@@ -318,24 +321,14 @@
     positionNotice();
   };
 
-  const isDraftForIdentity = (draft, identity) => {
-    if (!draft || !identity || draft.key !== identity.key) return false;
-
-    if (identity.isNew) {
-      return draft.isNew === true && draft.projectId === identity.projectId;
-    }
-
-    return draft.isNew === false && draft.taskKey === identity.taskKey;
-  };
-
   const checkForRecoverableDraft = async () => {
     if (!draftsEnabled) return;
 
-    const editorField = getDescriptionEditorField();
-    const editor = getDescriptionEditor();
     const identity = getDraftIdentity();
+    const editorField = identity ? getDescriptionEditorField() : null;
+    const editor = identity ? getDescriptionEditor() : null;
 
-    if (!editorField || !editor || !identity) {
+    if (!identity || !editorField || !editor) {
       removeNotice();
       return;
     }
@@ -419,16 +412,20 @@
 
     if (editor === observedEditor) return;
 
-    if (observedEditor || observedEditorField) {
-      if (observedEditor && inputHandler) observedEditor.removeEventListener('input', inputHandler);
-      if (observedEditor && beforeInputHandler) observedEditor.removeEventListener('beforeinput', beforeInputHandler);
-      editorMutationObserver?.disconnect();
+    if (observedEditor && inputHandler) {
+      observedEditor.removeEventListener('input', inputHandler);
     }
+
+    if (observedEditor && beforeInputHandler) {
+      observedEditor.removeEventListener('beforeinput', beforeInputHandler);
+    }
+
+    editorMutationObserver?.disconnect();
+    editorMutationObserver = null;
 
     observedEditor = editor;
     inputHandler = null;
     beforeInputHandler = null;
-    editorMutationObserver = null;
     userHasEdited = false;
 
     if (!editor) return;
@@ -463,7 +460,7 @@
     const locationKey = `${location.pathname}${location.search}`;
     if (locationKey === lastLocationKey) return;
 
-    const previousIdentityKey = lastIdentityKey ?? getDraftIdentity()?.key ?? null;
+    const previousIdentityKey = lastIdentityKey;
     lastLocationKey = locationKey;
 
     removeNotice();
@@ -471,8 +468,8 @@
 
     const currentIdentity = getDraftIdentity();
 
-    // Если новая задача была успешно создана и появилась реальная taskCode,
-    // временный new:<projectId> больше не нужен.
+    // Если новая задача получила реальный taskCode после сохранения,
+    // временный черновик new:<projectId> больше не нужен.
     if (previousIdentityKey?.startsWith('new:') && currentIdentity && !currentIdentity.isNew) {
       await removeDraft(previousIdentityKey);
     }
@@ -598,6 +595,9 @@
     subtree: true,
   });
 
+  // В SPA query-параметры могут поменяться через history API без popstate.
+  // Небольшая проверка страхует привязку черновика к актуальной задаче.
+  window.setInterval(handleLocationChange, 500);
   window.addEventListener('popstate', handleLocationChange);
   window.addEventListener('resize', positionNotice);
   window.addEventListener('scroll', positionNotice, true);
