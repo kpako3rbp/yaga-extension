@@ -6,6 +6,7 @@
 
   const ATTRIBUTE_WRAPPER_SELECTOR = '[data-class="AttributeWrapper_wrapper"]';
   const ATTRIBUTE_LABEL_SELECTOR = '[data-class="AttributeLabel_title"]';
+  const EDITOR_FIELD_SELECTOR = '[data-class="AttributeTextEditor_wrapper"]';
   const EDITOR_SELECTOR = '.ProseMirror[contenteditable="true"]';
   const TASK_TITLE_SELECTOR = '[data-class="TaskTypeHeader_title_2"]';
 
@@ -13,12 +14,13 @@
   const STYLE_ID = 'jaga-description-draft-styles';
 
   let observedEditor = null;
-  let observedWrapper = null;
+  let observedEditorField = null;
   let inputHandler = null;
-  let wrapperClickHandler = null;
+  let editorFieldClickHandler = null;
   let saveTimer = null;
   let currentDraftKey = null;
   let lastPathname = location.pathname;
+  let noticeAnchor = null;
 
   const storageGet = (key, fallback) =>
     new Promise((resolve) => {
@@ -52,7 +54,11 @@
     });
   };
 
-  const getDescriptionEditor = () => getDescriptionWrapper()?.querySelector(EDITOR_SELECTOR) ?? null;
+  const getDescriptionEditorField = () =>
+    getDescriptionWrapper()?.querySelector(EDITOR_FIELD_SELECTOR) ?? null;
+
+  const getDescriptionEditor = () =>
+    getDescriptionWrapper()?.querySelector(EDITOR_SELECTOR) ?? null;
 
   const getTaskTitle = () => {
     const taskTitle = document.querySelector(TASK_TITLE_SELECTOR)?.textContent?.trim();
@@ -71,9 +77,11 @@
     const existingTaskMatch = location.pathname.match(/^\/browse\/([^/?#]+)/);
 
     if (existingTaskMatch) {
+      const taskKey = decodeURIComponent(existingTaskMatch[1]);
+
       return {
-        key: `task:${decodeURIComponent(existingTaskMatch[1])}`,
-        taskKey: decodeURIComponent(existingTaskMatch[1]),
+        key: `task:${taskKey}`,
+        taskKey,
         isNew: false,
       };
     }
@@ -153,12 +161,36 @@
       minute: '2-digit',
     }).format(new Date(timestamp));
 
+  const positionNotice = () => {
+    const notice = document.getElementById(NOTICE_ID);
+    if (!notice || !noticeAnchor?.isConnected) return;
+
+    const rect = noticeAnchor.getBoundingClientRect();
+    const gap = 8;
+    const viewportPadding = 12;
+    const preferredWidth = Math.min(420, Math.max(320, rect.width));
+    const width = Math.min(preferredWidth, window.innerWidth - viewportPadding * 2);
+
+    let left = rect.left;
+    if (left + width > window.innerWidth - viewportPadding) {
+      left = window.innerWidth - width - viewportPadding;
+    }
+    left = Math.max(viewportPadding, left);
+
+    notice.style.width = `${width}px`;
+    notice.style.left = `${left}px`;
+    notice.style.top = `${rect.bottom + gap}px`;
+  };
+
   const removeNotice = () => {
     document.getElementById(NOTICE_ID)?.remove();
+    noticeAnchor = null;
   };
 
   const focusEditorAtEnd = (editor) => {
-    editor.focus();
+    if (!editor?.isConnected) return;
+
+    editor.focus({ preventScroll: true });
 
     const selection = window.getSelection();
     if (!selection) return;
@@ -171,48 +203,57 @@
     selection.addRange(range);
   };
 
-  const applyDraftToEditor = (wrapper, draft) => {
-    const editor = wrapper.querySelector(EDITOR_SELECTOR);
+  const replaceEditorContent = (editor, html) => {
+    focusEditorAtEnd(editor);
+
+    const selection = window.getSelection();
+    if (!selection) return false;
+
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const inserted = document.execCommand('insertHTML', false, html);
+
+    if (!inserted) {
+      editor.innerHTML = html;
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+    }
+
+    return true;
+  };
+
+  const applyDraftToEditor = (draft) => {
+    const editor = getDescriptionEditor();
     if (!editor) return false;
 
-    editor.innerHTML = draft.html;
+    if (!replaceEditorContent(editor, draft.html)) return false;
 
-    editor.dispatchEvent(
-      new InputEvent('input', {
-        bubbles: true,
-        inputType: 'insertText',
-        data: null,
-      }),
-    );
-    editor.dispatchEvent(new Event('change', { bubbles: true }));
+    window.requestAnimationFrame(() => {
+      const currentEditor = getDescriptionEditor();
+      if (!currentEditor) return;
 
-    focusEditorAtEnd(editor);
-    scheduleSave(editor);
+      focusEditorAtEnd(currentEditor);
+      scheduleSave(currentEditor);
+    });
 
     return true;
   };
 
   const restoreDraft = (draft) => {
-    const wrapper = getDescriptionWrapper();
-    if (!wrapper) return;
+    const editor = getDescriptionEditor();
+    if (!editor) return;
 
-    window.setTimeout(() => {
-      const currentWrapper = getDescriptionWrapper();
-      if (!currentWrapper) return;
+    focusEditorAtEnd(editor);
 
-      if (applyDraftToEditor(currentWrapper, draft)) {
-        removeNotice();
-
-        const editor = currentWrapper.querySelector(EDITOR_SELECTOR);
-        if (editor) {
-          window.requestAnimationFrame(() => focusEditorAtEnd(editor));
-        }
-      }
-    }, 0);
+    if (applyDraftToEditor(draft)) {
+      removeNotice();
+    }
   };
 
-  const showRecoveryNotice = (draft, wrapper) => {
-    if (document.getElementById(NOTICE_ID)) return;
+  const showRecoveryNotice = (draft, anchor) => {
+    if (document.getElementById(NOTICE_ID) || !document.body) return;
 
     const notice = document.createElement('div');
     notice.id = NOTICE_ID;
@@ -227,6 +268,10 @@
       </div>
     `;
 
+    notice.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+
     notice.querySelector('[data-action="restore"]').addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -236,6 +281,7 @@
     notice.querySelector('[data-action="remove"]').addEventListener('click', async (event) => {
       event.preventDefault();
       event.stopPropagation();
+
       await removeDraft(draft.key);
       removeNotice();
 
@@ -243,15 +289,17 @@
       if (editor) focusEditorAtEnd(editor);
     });
 
-    wrapper.appendChild(notice);
+    noticeAnchor = anchor;
+    document.body.appendChild(notice);
+    positionNotice();
   };
 
   const checkForRecoverableDraft = async () => {
-    const wrapper = getDescriptionWrapper();
+    const editorField = getDescriptionEditorField();
     const editor = getDescriptionEditor();
     const identity = getDraftIdentity();
 
-    if (!wrapper || !editor || !identity) return;
+    if (!editorField || !editor || !identity) return;
 
     const drafts = await getDrafts();
     const draft = drafts.find((item) => item.key === identity.key);
@@ -267,30 +315,36 @@
       return;
     }
 
-    showRecoveryNotice(draft, wrapper);
+    showRecoveryNotice(draft, editorField);
   };
 
   const bindEditor = () => {
-    const wrapper = getDescriptionWrapper();
+    const editorField = getDescriptionEditorField();
     const editor = getDescriptionEditor();
 
-    if (observedWrapper !== wrapper) {
-      if (observedWrapper && wrapperClickHandler) {
-        observedWrapper.removeEventListener('click', wrapperClickHandler, true);
+    if (observedEditorField !== editorField) {
+      if (observedEditorField && editorFieldClickHandler) {
+        observedEditorField.removeEventListener('click', editorFieldClickHandler, true);
       }
 
-      observedWrapper = wrapper;
-      wrapperClickHandler = null;
+      observedEditorField = editorField;
+      editorFieldClickHandler = null;
 
-      if (wrapper) {
-        wrapperClickHandler = () => {
+      if (editorField) {
+        editorFieldClickHandler = () => {
           window.setTimeout(() => {
             bindEditor();
-            checkForRecoverableDraft();
+
+            const currentEditor = getDescriptionEditor();
+            if (!currentEditor) return;
+
+            if (document.activeElement === currentEditor || currentEditor.matches(':focus')) {
+              checkForRecoverableDraft();
+            }
           }, 0);
         };
 
-        wrapper.addEventListener('click', wrapperClickHandler, true);
+        editorField.addEventListener('click', editorFieldClickHandler, true);
       }
     }
 
@@ -326,7 +380,7 @@
     }
 
     observedEditor = null;
-    observedWrapper = null;
+    observedEditorField = null;
     bindEditor();
   };
 
@@ -337,8 +391,8 @@
     style.id = STYLE_ID;
     style.textContent = `
       #${NOTICE_ID} {
-        width: min(100%, 420px);
-        margin-top: 8px;
+        position: fixed;
+        z-index: 1000000;
         padding: 12px;
         display: flex;
         align-items: center;
@@ -349,6 +403,7 @@
         border-radius: 8px;
         box-sizing: border-box;
         color: rgba(16, 24, 40, 1);
+        box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
         font-family: Inter, Arial, sans-serif;
         font-size: 13px;
         line-height: 18px;
@@ -359,6 +414,10 @@
         display: flex;
         flex-direction: column;
         gap: 2px;
+      }
+
+      #${NOTICE_ID} .jaga-draft__content strong {
+        white-space: nowrap;
       }
 
       #${NOTICE_ID} .jaga-draft__content span {
@@ -400,10 +459,14 @@
   const observer = new MutationObserver(() => {
     handleRouteChange();
     bindEditor();
+    positionNotice();
   });
 
   observer.observe(document.documentElement, {
     childList: true,
     subtree: true,
   });
+
+  window.addEventListener('resize', positionNotice);
+  window.addEventListener('scroll', positionNotice, true);
 })();
