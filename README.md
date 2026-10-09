@@ -30,9 +30,9 @@ flex-direction: column !important;
 
 ## Установка
 
-1. Распакуйте архив из свежего [релиза](https://github.com/kpako3rbp/yaga-extension/releases).
+1. Распакуйте архив `yaga-extension.zip` из свежего [релиза](https://github.com/kpako3rbp/yaga-extension/releases).
 2. Откройте `chrome://extensions/`.
 3. Включите «Режим разработчика».
 4. Нажмите «Загрузить распакованное расширение».
-5. Выберите папку `yaga-extension`.
+5. Выберите папку `yaga-extension` из распакованного архива.
 6. Откройте или обновите страницу `https://jaga.rt.ru/browse/TASK-123`.
