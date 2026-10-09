@@ -4,7 +4,6 @@
   const STYLE_ID = 'jaga-comments-toggle-styles';
   const STORAGE_KEY = 'jagaCommentsHidden';
   const ATTRIBUTE_SELECTOR = '[data-class="AttributeWrapper_wrapper"]';
-  const EDITOR_PREVIEW_SELECTOR = '[data-class="TextEditorPreview_wrapper"]';
 
   const ICON_HIDE = /*html*/ `
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -23,7 +22,9 @@
     </svg>
   `;
 
-  if (document.getElementById(WIDGET_ID)) return;
+  const isTaskPage = () => /^\/browse\/[^/?#]+/.test(location.pathname);
+
+  if (document.getElementById(STYLE_ID)) return;
 
   const style = document.createElement('style');
   style.id = STYLE_ID;
@@ -98,6 +99,7 @@
   let modifiedAttributeWrapper = null;
   let previousFlexDirection = null;
   let previousFlexDirectionPriority = '';
+  let lastPathname = location.pathname;
 
   const restoreThirdAttributeWrapper = () => {
     if (!modifiedAttributeWrapper) return;
@@ -144,8 +146,23 @@
     button.setAttribute('aria-pressed', String(commentsHidden));
   };
 
-  const applyState = (hidden) => {
-    commentsHidden = hidden;
+  const mountButton = () => {
+    if (!isTaskPage() || !document.body || document.getElementById(WIDGET_ID)) return;
+    document.body.appendChild(button);
+  };
+
+  const unmountButton = () => {
+    document.getElementById(WIDGET_ID)?.remove();
+  };
+
+  const syncPageState = () => {
+    if (!isTaskPage()) {
+      document.documentElement.classList.remove(ROOT_CLASS);
+      restoreThirdAttributeWrapper();
+      unmountButton();
+      return;
+    }
+
     document.documentElement.classList.toggle(ROOT_CLASS, commentsHidden);
 
     if (commentsHidden) {
@@ -155,17 +172,13 @@
     }
 
     renderButton();
+    mountButton();
   };
 
-  const mountButton = () => {
-    if (!document.body || document.getElementById(WIDGET_ID)) return;
-    document.body.appendChild(button);
+  const applyState = (hidden) => {
+    commentsHidden = hidden;
+    syncPageState();
   };
-
-  mountButton();
-  if (!document.body) {
-    document.addEventListener('DOMContentLoaded', mountButton, { once: true });
-  }
 
   chrome.storage.local.get({ [STORAGE_KEY]: false }, (result) => {
     applyState(Boolean(result[STORAGE_KEY]));
@@ -178,15 +191,25 @@
   });
 
   const observer = new MutationObserver(() => {
-    if (commentsHidden) {
-      applyThirdAttributeWrapper();
-    }
-
-    mountButton();
+    syncPageState();
   });
 
   observer.observe(document.documentElement, {
     childList: true,
     subtree: true,
   });
+
+  window.setInterval(() => {
+    if (location.pathname === lastPathname) return;
+    lastPathname = location.pathname;
+    syncPageState();
+  }, 500);
+
+  window.addEventListener('popstate', syncPageState);
+
+  if (document.body) {
+    syncPageState();
+  } else {
+    document.addEventListener('DOMContentLoaded', syncPageState, { once: true });
+  }
 })();
