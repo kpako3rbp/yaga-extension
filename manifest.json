@@ -28,7 +28,7 @@
     },
     {
       "matches": ["https://jaga.rt.ru/*"],
-      "js": ["drafts.js"],
+      "js": ["drafts.js", "draft-focus.js"],
       "run_at": "document_idle"
     }
   ]
