@@ -18,6 +18,7 @@
   let editorFieldClickHandler = null;
   let inputHandler = null;
   let beforeInputHandler = null;
+  let focusOutHandler = null;
   let editorMutationObserver = null;
   let saveTimer = null;
   let noticeAnchor = null;
@@ -25,6 +26,7 @@
   let lastLocationKey = `${location.pathname}${location.search}`;
   let lastIdentityKey = null;
 
+  // Storage
   const storageGet = (key, fallback) =>
     new Promise((resolve) => {
       chrome.storage.local.get({ [key]: fallback }, (result) => resolve(result[key]));
@@ -35,14 +37,28 @@
       chrome.storage.local.set(value, resolve);
     });
 
-  const escapeHtml = (value) =>
-    String(value)
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&#039;');
+  const getDrafts = async () => {
+    const drafts = await storageGet(DRAFTS_STORAGE_KEY, []);
+    return Array.isArray(drafts) ? drafts : [];
+  };
 
+  const setDrafts = async (drafts) => {
+    const sortedDrafts = [...drafts]
+      .filter((draft) => draft?.key && Number.isFinite(draft.updatedAt))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, MAX_DRAFTS);
+
+    await storageSet({ [DRAFTS_STORAGE_KEY]: sortedDrafts });
+  };
+
+  const removeDraft = async (key) => {
+    if (!key) return;
+
+    const drafts = await getDrafts();
+    await setDrafts(drafts.filter((draft) => draft.key !== key));
+  };
+
+  // Task identity
   const normalizeTaskCode = (value) => {
     const taskCode = value?.trim();
     if (!taskCode || !/^[\p{L}\d_-]+-\d+$/u.test(taskCode)) return null;
@@ -68,6 +84,7 @@
     return linkMatch?.[1] ?? null;
   };
 
+  // Editor lookup
   const isVisible = (element) => {
     if (!element?.isConnected || element.getClientRects().length === 0) return false;
 
@@ -102,9 +119,8 @@
       };
     }
 
-    // Новая задача в Яге может открываться на обычном URL канбана без query-параметров.
-    // Поэтому отсутствие taskCode само по себе недостаточно. Новым считаем только контекст,
-    // в котором реально присутствует видимая форма задачи с полем «Описание».
+    // Для новой задачи taskCode ещё нет. Считаем контекст новой задачей только
+    // когда на странице реально открыт видимый редактор поля «Описание».
     if (!projectId || !getDescriptionEditorField()) return null;
 
     return {
@@ -115,27 +131,68 @@
     };
   };
 
-  const getDrafts = async () => {
-    const drafts = await storageGet(DRAFTS_STORAGE_KEY, []);
-    return Array.isArray(drafts) ? drafts : [];
+  const isDraftForIdentity = (draft, identity) => {
+    if (!draft || !identity || draft.key !== identity.key) return false;
+
+    if (identity.isNew) {
+      return draft.isNew === true && draft.projectId === identity.projectId;
+    }
+
+    return draft.isNew === false && draft.taskKey === identity.taskKey;
   };
 
-  const setDrafts = async (drafts) => {
-    const sortedDrafts = [...drafts]
-      .filter((draft) => draft?.key && Number.isFinite(draft.updatedAt))
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, MAX_DRAFTS);
+  // Editor content
+  const sanitizeEditorHtml = (html) => {
+    const template = document.createElement('template');
+    template.innerHTML = html ?? '';
 
-    await storageSet({ [DRAFTS_STORAGE_KEY]: sortedDrafts });
+    template.content
+      .querySelectorAll(
+        'br.ProseMirror-trailingBreak, .ProseMirror-separator, .ProseMirror-widget',
+      )
+      .forEach((element) => element.remove());
+
+    return template.innerHTML;
   };
 
-  const removeDraft = async (key) => {
-    if (!key) return;
+  const focusEditorAtEnd = (editor) => {
+    if (!editor?.isConnected) return;
 
-    const drafts = await getDrafts();
-    await setDrafts(drafts.filter((draft) => draft.key !== key));
+    editor.focus({ preventScroll: true });
+
+    const selection = window.getSelection();
+    if (!selection) return;
+
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
   };
 
+  const replaceEditorContent = (editor, html) => {
+    if (!editor?.isConnected) return false;
+
+    const template = document.createElement('template');
+    template.innerHTML = sanitizeEditorHtml(html);
+
+    // Полностью заменяем top-level DOM редактора. Это не даёт браузеру вставить
+    // весь восстановленный фрагмент внутрь текущего <ol>/<ul> контекста.
+    editor.replaceChildren(template.content.cloneNode(true));
+
+    editor.dispatchEvent(
+      new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertFromPaste',
+        data: null,
+      }),
+    );
+
+    window.requestAnimationFrame(() => focusEditorAtEnd(editor));
+    return true;
+  };
+
+  // Draft save
   const saveDraft = async (editor) => {
     if (!draftsEnabled || !editor?.isConnected) return;
 
@@ -149,7 +206,7 @@
       projectId: identity.projectId,
       isNew: identity.isNew,
       url: location.href,
-      html: editor.innerHTML,
+      html: sanitizeEditorHtml(editor.innerHTML),
       text: editor.textContent?.trim() ?? '',
       updatedAt: Date.now(),
     };
@@ -164,6 +221,15 @@
     window.clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => saveDraft(editor), SAVE_DELAY);
   };
+
+  // Recovery notice
+  const escapeHtml = (value) =>
+    String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
 
   const formatDraftTime = (timestamp) => {
     const date = new Date(timestamp);
@@ -212,52 +278,6 @@
     noticeAnchor = null;
   };
 
-  const focusEditorAtEnd = (editor) => {
-    if (!editor?.isConnected) return;
-
-    editor.focus({ preventScroll: true });
-
-    const selection = window.getSelection();
-    if (!selection) return;
-
-    const range = document.createRange();
-    range.selectNodeContents(editor);
-    range.collapse(false);
-    selection.removeAllRanges();
-    selection.addRange(range);
-  };
-
-  const replaceEditorContent = (editor, html) => {
-    focusEditorAtEnd(editor);
-
-    const selection = window.getSelection();
-    if (!selection) return false;
-
-    const range = document.createRange();
-    range.selectNodeContents(editor);
-    selection.removeAllRanges();
-    selection.addRange(range);
-
-    const inserted = document.execCommand('insertHTML', false, html);
-
-    if (!inserted) {
-      editor.innerHTML = html;
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-    }
-
-    return true;
-  };
-
-  const isDraftForIdentity = (draft, identity) => {
-    if (!draft || !identity || draft.key !== identity.key) return false;
-
-    if (identity.isNew) {
-      return draft.isNew === true && draft.projectId === identity.projectId;
-    }
-
-    return draft.isNew === false && draft.taskKey === identity.taskKey;
-  };
-
   const restoreDraft = (draft) => {
     const identity = getDraftIdentity();
     const editor = getDescriptionEditor();
@@ -270,15 +290,8 @@
     if (!replaceEditorContent(editor, draft.html)) return;
 
     removeNotice();
-
-    window.requestAnimationFrame(() => {
-      const currentEditor = getDescriptionEditor();
-      if (!currentEditor) return;
-
-      focusEditorAtEnd(currentEditor);
-      userHasEdited = true;
-      scheduleSave(currentEditor);
-    });
+    userHasEdited = true;
+    scheduleSave(editor);
   };
 
   const showRecoveryNotice = (draft, anchor) => {
@@ -297,6 +310,7 @@
       </div>
     `;
 
+    // Кнопки popup не должны забирать фокус у ProseMirror до обработки click.
     notice.addEventListener('pointerdown', (event) => event.preventDefault());
 
     notice.querySelector('[data-action="restore"]').addEventListener('click', (event) => {
@@ -341,7 +355,9 @@
       return;
     }
 
-    if (draft.html === editor.innerHTML) {
+    // Сравниваем очищенный HTML, чтобы служебные элементы ProseMirror
+    // не создавали ложное отличие между редактором и черновиком.
+    if (sanitizeEditorHtml(draft.html) === sanitizeEditorHtml(editor.innerHTML)) {
       await removeDraft(draft.key);
       removeNotice();
       return;
@@ -350,6 +366,7 @@
     showRecoveryNotice(draft, editorField);
   };
 
+  // Editor binding
   const unbindEditor = () => {
     window.clearTimeout(saveTimer);
     saveTimer = null;
@@ -363,6 +380,10 @@
       observedEditor.removeEventListener('beforeinput', beforeInputHandler);
     }
 
+    if (observedEditor && focusOutHandler) {
+      observedEditor.removeEventListener('focusout', focusOutHandler);
+    }
+
     if (observedEditorField && editorFieldClickHandler) {
       observedEditorField.removeEventListener('click', editorFieldClickHandler, true);
     }
@@ -374,6 +395,7 @@
     editorFieldClickHandler = null;
     inputHandler = null;
     beforeInputHandler = null;
+    focusOutHandler = null;
     userHasEdited = false;
   };
 
@@ -420,12 +442,17 @@
       observedEditor.removeEventListener('beforeinput', beforeInputHandler);
     }
 
+    if (observedEditor && focusOutHandler) {
+      observedEditor.removeEventListener('focusout', focusOutHandler);
+    }
+
     editorMutationObserver?.disconnect();
     editorMutationObserver = null;
 
     observedEditor = editor;
     inputHandler = null;
     beforeInputHandler = null;
+    focusOutHandler = null;
     userHasEdited = false;
 
     if (!editor) return;
@@ -442,8 +469,16 @@
       scheduleSave(editor);
     };
 
+    focusOutHandler = () => {
+      window.setTimeout(() => {
+        if (document.activeElement === editor) return;
+        removeNotice();
+      }, 0);
+    };
+
     editor.addEventListener('beforeinput', beforeInputHandler);
     editor.addEventListener('input', inputHandler);
+    editor.addEventListener('focusout', focusOutHandler);
 
     editorMutationObserver = new MutationObserver(() => {
       if (userHasEdited) scheduleSave(editor);
@@ -456,6 +491,7 @@
     });
   };
 
+  // SPA lifecycle
   const handleLocationChange = async () => {
     const locationKey = `${location.pathname}${location.search}`;
     if (locationKey === lastLocationKey) return;
@@ -468,8 +504,8 @@
 
     const currentIdentity = getDraftIdentity();
 
-    // Если новая задача получила реальный taskCode после сохранения,
-    // временный черновик new:<projectId> больше не нужен.
+    // После создания новой задачи появляется настоящий taskCode — временный
+    // черновик new:<projectId> больше не нужен.
     if (previousIdentityKey?.startsWith('new:') && currentIdentity && !currentIdentity.isNew) {
       await removeDraft(previousIdentityKey);
     }
@@ -489,6 +525,7 @@
     }
   };
 
+  // Styles
   const injectStyles = () => {
     if (document.getElementById(STYLE_ID)) return;
 
@@ -575,8 +612,8 @@
     document.documentElement.appendChild(style);
   };
 
+  // Init
   injectStyles();
-
   storageGet(DRAFTS_ENABLED_STORAGE_KEY, false).then(setDraftsEnabled);
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -595,8 +632,7 @@
     subtree: true,
   });
 
-  // В SPA query-параметры могут поменяться через history API без popstate.
-  // Небольшая проверка страхует привязку черновика к актуальной задаче.
+  // В SPA query-параметры могут измениться через history API без popstate.
   window.setInterval(handleLocationChange, 500);
   window.addEventListener('popstate', handleLocationChange);
   window.addEventListener('resize', positionNotice);
