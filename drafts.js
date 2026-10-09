@@ -1,15 +1,13 @@
 (() => {
   const DRAFTS_STORAGE_KEY = 'jagaDescriptionDrafts';
   const DRAFTS_ENABLED_STORAGE_KEY = 'jagaDescriptionDraftsEnabled';
-  const NEW_TASK_SESSION_KEY = 'jagaNewTaskDraftId';
-  const MAX_DRAFTS = 5;
+  const MAX_DRAFTS = 20;
   const SAVE_DELAY = 300;
 
   const ATTRIBUTE_WRAPPER_SELECTOR = '[data-class="AttributeWrapper_wrapper"]';
   const ATTRIBUTE_LABEL_SELECTOR = '[data-class="AttributeLabel_title"]';
   const EDITOR_FIELD_SELECTOR = '[data-class="AttributeTextEditor_wrapper"]';
   const EDITOR_SELECTOR = '.ProseMirror[contenteditable="true"]';
-  const TASK_TITLE_SELECTOR = '[data-class="TaskTypeHeader_title_2"]';
 
   const NOTICE_ID = 'jaga-description-draft-notice';
   const STYLE_ID = 'jaga-description-draft-styles';
@@ -17,13 +15,15 @@
   let draftsEnabled = false;
   let observedEditor = null;
   let observedEditorField = null;
-  let inputHandler = null;
   let editorFieldClickHandler = null;
+  let inputHandler = null;
+  let beforeInputHandler = null;
   let editorMutationObserver = null;
   let saveTimer = null;
-  let currentDraftKey = null;
-  let lastPathname = location.pathname;
   let noticeAnchor = null;
+  let userHasEdited = false;
+  let lastLocationKey = `${location.pathname}${location.search}`;
+  let lastIdentityKey = null;
 
   const storageGet = (key, fallback) =>
     new Promise((resolve) => {
@@ -43,9 +43,68 @@
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#039;');
 
-  const createId = () => {
-    if (crypto.randomUUID) return crypto.randomUUID();
-    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const normalizeTaskCode = (value) => {
+    const taskCode = value?.trim();
+    if (!taskCode || !/^[\p{L}\d_-]+-\d+$/u.test(taskCode)) return null;
+    return taskCode.toUpperCase();
+  };
+
+  const getTaskCode = () => {
+    const queryTaskCode = normalizeTaskCode(new URLSearchParams(location.search).get('taskCode'));
+    if (queryTaskCode) return queryTaskCode;
+
+    const browseMatch = location.pathname.match(/^\/browse\/([^/?#]+)/);
+    if (!browseMatch) return null;
+
+    return normalizeTaskCode(decodeURIComponent(browseMatch[1]));
+  };
+
+  const getProjectId = () => {
+    const pathMatch = location.pathname.match(/^\/project\/(\d+)/);
+    if (pathMatch) return pathMatch[1];
+
+    const projectLink = document.querySelector('a[href^="/project/"]');
+    const linkMatch = projectLink?.getAttribute('href')?.match(/^\/project\/(\d+)/);
+    return linkMatch?.[1] ?? null;
+  };
+
+  const isNewTaskContext = () => {
+    if (getTaskCode()) return false;
+
+    const params = new URLSearchParams(location.search);
+    const modal = params.get('modal')?.toLowerCase() ?? '';
+
+    // В Яге создание задачи открывается отдельной task-модалкой.
+    // Считаем форму новой задачей только при явном create/new-маркере,
+    // а не просто потому, что в URL отсутствует taskCode.
+    if (/create.*task|task.*create|new.*task|task.*new/.test(modal)) return true;
+
+    return /^\/(?:create-task|new-task)(?:\/|$)/i.test(location.pathname);
+  };
+
+  const getDraftIdentity = () => {
+    const taskCode = getTaskCode();
+
+    if (taskCode) {
+      return {
+        key: `task:${taskCode}`,
+        taskKey: taskCode,
+        projectId: getProjectId(),
+        isNew: false,
+      };
+    }
+
+    if (!isNewTaskContext()) return null;
+
+    const projectId = getProjectId();
+    if (!projectId) return null;
+
+    return {
+      key: `new:${projectId}`,
+      taskKey: null,
+      projectId,
+      isNew: true,
+    };
   };
 
   const getDescriptionWrapper = () => {
@@ -63,48 +122,6 @@
   const getDescriptionEditor = () =>
     getDescriptionWrapper()?.querySelector(EDITOR_SELECTOR) ?? null;
 
-  const getTaskTitle = () => {
-    const taskTitle = document.querySelector(TASK_TITLE_SELECTOR)?.textContent?.trim();
-    if (taskTitle) return taskTitle;
-
-    return document.title.replace(/\s+-\s+Яга\s*$/, '').trim() || 'Новая задача';
-  };
-
-  const getProjectId = () => {
-    const projectLink = document.querySelector('a[href^="/project/"]');
-    const match = projectLink?.getAttribute('href')?.match(/^\/project\/(\d+)/);
-    return match?.[1] ?? 'unknown';
-  };
-
-  const getDraftIdentity = () => {
-    const existingTaskMatch = location.pathname.match(/^\/browse\/([^/?#]+)/);
-
-    if (existingTaskMatch) {
-      const taskKey = decodeURIComponent(existingTaskMatch[1]);
-
-      return {
-        key: `task:${taskKey}`,
-        taskKey,
-        isNew: false,
-      };
-    }
-
-    if (!getDescriptionWrapper()) return null;
-
-    let temporaryId = sessionStorage.getItem(NEW_TASK_SESSION_KEY);
-
-    if (!temporaryId) {
-      temporaryId = createId();
-      sessionStorage.setItem(NEW_TASK_SESSION_KEY, temporaryId);
-    }
-
-    return {
-      key: `new:${getProjectId()}:${temporaryId}`,
-      taskKey: null,
-      isNew: true,
-    };
-  };
-
   const getDrafts = async () => {
     const drafts = await storageGet(DRAFTS_STORAGE_KEY, []);
     return Array.isArray(drafts) ? drafts : [];
@@ -112,6 +129,7 @@
 
   const setDrafts = async (drafts) => {
     const sortedDrafts = [...drafts]
+      .filter((draft) => draft?.key && Number.isFinite(draft.updatedAt))
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, MAX_DRAFTS);
 
@@ -119,22 +137,23 @@
   };
 
   const removeDraft = async (key) => {
+    if (!key) return;
     const drafts = await getDrafts();
     await setDrafts(drafts.filter((draft) => draft.key !== key));
   };
 
   const saveDraft = async (editor) => {
-    if (!draftsEnabled) return;
+    if (!draftsEnabled || !editor?.isConnected) return;
 
     const identity = getDraftIdentity();
-    if (!identity || !editor?.isConnected) return;
+    if (!identity) return;
 
     const drafts = await getDrafts();
     const nextDraft = {
       key: identity.key,
       taskKey: identity.taskKey,
+      projectId: identity.projectId,
       isNew: identity.isNew,
-      title: getTaskTitle(),
       url: location.href,
       html: editor.innerHTML,
       text: editor.textContent?.trim() ?? '',
@@ -142,7 +161,7 @@
     };
 
     await setDrafts([nextDraft, ...drafts.filter((draft) => draft.key !== identity.key)]);
-    currentDraftKey = identity.key;
+    lastIdentityKey = identity.key;
   };
 
   const scheduleSave = (editor) => {
@@ -173,8 +192,8 @@
     const rect = noticeAnchor.getBoundingClientRect();
     const gap = 8;
     const viewportPadding = 12;
-    const maxWidth = Math.min(420, window.innerWidth - viewportPadding * 2);
-    const width = Math.max(260, Math.min(maxWidth, Math.max(rect.width, 320)));
+    const availableWidth = Math.max(0, window.innerWidth - viewportPadding * 2);
+    const width = Math.min(420, availableWidth, Math.max(300, rect.width));
 
     let left = rect.left;
     if (left + width > window.innerWidth - viewportPadding) {
@@ -210,7 +229,6 @@
     const range = document.createRange();
     range.selectNodeContents(editor);
     range.collapse(false);
-
     selection.removeAllRanges();
     selection.addRange(range);
   };
@@ -236,32 +254,28 @@
     return true;
   };
 
-  const applyDraftToEditor = (draft) => {
+  const restoreDraft = (draft) => {
+    const identity = getDraftIdentity();
     const editor = getDescriptionEditor();
-    if (!editor) return false;
 
-    if (!replaceEditorContent(editor, draft.html)) return false;
+    // Последняя защита от вставки черновика другой задачи.
+    if (!identity || draft.key !== identity.key || !editor) {
+      removeNotice();
+      return;
+    }
+
+    if (!replaceEditorContent(editor, draft.html)) return;
+
+    removeNotice();
 
     window.requestAnimationFrame(() => {
       const currentEditor = getDescriptionEditor();
       if (!currentEditor) return;
 
       focusEditorAtEnd(currentEditor);
+      userHasEdited = true;
       scheduleSave(currentEditor);
     });
-
-    return true;
-  };
-
-  const restoreDraft = (draft) => {
-    const editor = getDescriptionEditor();
-    if (!editor) return;
-
-    focusEditorAtEnd(editor);
-
-    if (applyDraftToEditor(draft)) {
-      removeNotice();
-    }
   };
 
   const showRecoveryNotice = (draft, anchor) => {
@@ -280,9 +294,7 @@
       </div>
     `;
 
-    notice.addEventListener('pointerdown', (event) => {
-      event.preventDefault();
-    });
+    notice.addEventListener('pointerdown', (event) => event.preventDefault());
 
     notice.querySelector('[data-action="restore"]').addEventListener('click', (event) => {
       event.preventDefault();
@@ -306,6 +318,16 @@
     positionNotice();
   };
 
+  const isDraftForIdentity = (draft, identity) => {
+    if (!draft || !identity || draft.key !== identity.key) return false;
+
+    if (identity.isNew) {
+      return draft.isNew === true && draft.projectId === identity.projectId;
+    }
+
+    return draft.isNew === false && draft.taskKey === identity.taskKey;
+  };
+
   const checkForRecoverableDraft = async () => {
     if (!draftsEnabled) return;
 
@@ -313,10 +335,13 @@
     const editor = getDescriptionEditor();
     const identity = getDraftIdentity();
 
-    if (!editorField || !editor || !identity) return;
+    if (!editorField || !editor || !identity) {
+      removeNotice();
+      return;
+    }
 
     const drafts = await getDrafts();
-    const draft = drafts.find((item) => item.key === identity.key);
+    const draft = drafts.find((item) => isDraftForIdentity(item, identity));
 
     if (!draft) {
       removeNotice();
@@ -341,6 +366,10 @@
       observedEditor.removeEventListener('input', inputHandler);
     }
 
+    if (observedEditor && beforeInputHandler) {
+      observedEditor.removeEventListener('beforeinput', beforeInputHandler);
+    }
+
     if (observedEditorField && editorFieldClickHandler) {
       observedEditorField.removeEventListener('click', editorFieldClickHandler, true);
     }
@@ -349,15 +378,18 @@
     editorMutationObserver = null;
     observedEditor = null;
     observedEditorField = null;
-    inputHandler = null;
     editorFieldClickHandler = null;
+    inputHandler = null;
+    beforeInputHandler = null;
+    userHasEdited = false;
   };
 
   const bindEditor = () => {
     if (!draftsEnabled) return;
 
-    const editorField = getDescriptionEditorField();
-    const editor = getDescriptionEditor();
+    const identity = getDraftIdentity();
+    const editorField = identity ? getDescriptionEditorField() : null;
+    const editor = identity ? getDescriptionEditor() : null;
 
     if (observedEditorField !== editorField) {
       if (observedEditorField && editorFieldClickHandler) {
@@ -387,21 +419,39 @@
 
     if (editor === observedEditor) return;
 
-    if (observedEditor && inputHandler) {
-      observedEditor.removeEventListener('input', inputHandler);
+    if (observedEditor || observedEditorField) {
+      if (observedEditor && inputHandler) observedEditor.removeEventListener('input', inputHandler);
+      if (observedEditor && beforeInputHandler) observedEditor.removeEventListener('beforeinput', beforeInputHandler);
+      editorMutationObserver?.disconnect();
     }
 
-    editorMutationObserver?.disconnect();
-    editorMutationObserver = null;
     observedEditor = editor;
     inputHandler = null;
+    beforeInputHandler = null;
+    editorMutationObserver = null;
+    userHasEdited = false;
 
     if (!editor) return;
 
-    inputHandler = () => scheduleSave(editor);
+    beforeInputHandler = (event) => {
+      if (!event.isTrusted) return;
+      userHasEdited = true;
+      window.setTimeout(() => scheduleSave(editor), 0);
+    };
+
+    inputHandler = (event) => {
+      if (!event.isTrusted) return;
+      userHasEdited = true;
+      scheduleSave(editor);
+    };
+
+    editor.addEventListener('beforeinput', beforeInputHandler);
     editor.addEventListener('input', inputHandler);
 
-    editorMutationObserver = new MutationObserver(() => scheduleSave(editor));
+    editorMutationObserver = new MutationObserver(() => {
+      if (userHasEdited) scheduleSave(editor);
+    });
+
     editorMutationObserver.observe(editor, {
       childList: true,
       subtree: true,
@@ -409,24 +459,25 @@
     });
   };
 
-  const handleRouteChange = async () => {
-    if (lastPathname === location.pathname) return;
+  const handleLocationChange = async () => {
+    const locationKey = `${location.pathname}${location.search}`;
+    if (locationKey === lastLocationKey) return;
 
-    const previousPathname = lastPathname;
-    lastPathname = location.pathname;
+    const previousIdentityKey = lastIdentityKey ?? getDraftIdentity()?.key ?? null;
+    lastLocationKey = locationKey;
+
     removeNotice();
+    unbindEditor();
 
-    const previousWasNew = !/^\/browse\//.test(previousPathname);
-    const currentTaskMatch = location.pathname.match(/^\/browse\/([^/?#]+)/);
+    const currentIdentity = getDraftIdentity();
 
-    if (previousWasNew && currentTaskMatch && currentDraftKey?.startsWith('new:')) {
-      await removeDraft(currentDraftKey);
-      currentDraftKey = null;
-      sessionStorage.removeItem(NEW_TASK_SESSION_KEY);
+    // Если новая задача была успешно создана и появилась реальная taskCode,
+    // временный new:<projectId> больше не нужен.
+    if (previousIdentityKey?.startsWith('new:') && currentIdentity && !currentIdentity.isNew) {
+      await removeDraft(previousIdentityKey);
     }
 
-    observedEditor = null;
-    observedEditorField = null;
+    lastIdentityKey = currentIdentity?.key ?? null;
     bindEditor();
   };
 
@@ -434,6 +485,7 @@
     draftsEnabled = Boolean(enabled);
 
     if (draftsEnabled) {
+      lastIdentityKey = getDraftIdentity()?.key ?? null;
       bindEditor();
     } else {
       unbindEditor();
@@ -515,6 +567,12 @@
         background: rgb(255 204 204);
         color: rgba(16, 24, 40, 1);
       }
+
+      @media (max-width: 420px) {
+        #${NOTICE_ID} .jaga-draft__actions {
+          grid-template-columns: 1fr;
+        }
+      }
     `;
 
     document.documentElement.appendChild(style);
@@ -530,7 +588,7 @@
   });
 
   const observer = new MutationObserver(() => {
-    handleRouteChange();
+    handleLocationChange();
     bindEditor();
     positionNotice();
   });
@@ -540,6 +598,7 @@
     subtree: true,
   });
 
+  window.addEventListener('popstate', handleLocationChange);
   window.addEventListener('resize', positionNotice);
   window.addEventListener('scroll', positionNotice, true);
 })();
