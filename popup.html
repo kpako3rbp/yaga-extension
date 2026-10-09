@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Настройки Jaga Extension</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <div class="popup__header">
+        <img class="popup__logo" src="icons/icon48.png" alt="" />
+        <div>
+          <h1>Jaga Extension</h1>
+          <p>Настройки расширения</p>
+        </div>
+      </div>
+
+      <section class="setting">
+        <div class="setting__row">
+          <div class="setting__text">
+            <label for="drafts-toggle">Сохранять черновики описания <span>(experimental)</span></label>
+          </div>
+
+          <label class="switch" aria-label="Сохранять черновики описания">
+            <input id="drafts-toggle" type="checkbox" />
+            <span class="switch__control"></span>
+          </label>
+        </div>
+
+        <p class="setting__description">
+          Экспериментальная функция. Временно сохраняет несохранённые изменения в описании задачи,
+          чтобы их можно было восстановить после разлогина, перезагрузки или случайного закрытия вкладки.
+        </p>
+      </section>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
