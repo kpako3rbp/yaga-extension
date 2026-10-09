@@ -7,14 +7,15 @@
   const ATTRIBUTE_WRAPPER_SELECTOR = '[data-class="AttributeWrapper_wrapper"]';
   const ATTRIBUTE_LABEL_SELECTOR = '[data-class="AttributeLabel_title"]';
   const EDITOR_SELECTOR = '.ProseMirror[contenteditable="true"]';
-  const PREVIEW_SELECTOR = '[data-class^="TextEditorPreview_wrapper"]';
   const TASK_TITLE_SELECTOR = '[data-class="TaskTypeHeader_title_2"]';
 
   const NOTICE_ID = 'jaga-description-draft-notice';
   const STYLE_ID = 'jaga-description-draft-styles';
 
   let observedEditor = null;
+  let observedWrapper = null;
   let inputHandler = null;
+  let wrapperClickHandler = null;
   let saveTimer = null;
   let currentDraftKey = null;
   let lastPathname = location.pathname;
@@ -39,7 +40,6 @@
 
   const createId = () => {
     if (crypto.randomUUID) return crypto.randomUUID();
-
     return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   };
 
@@ -157,11 +157,24 @@
     document.getElementById(NOTICE_ID)?.remove();
   };
 
+  const focusEditorAtEnd = (editor) => {
+    editor.focus();
+
+    const selection = window.getSelection();
+    if (!selection) return;
+
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
   const applyDraftToEditor = (wrapper, draft) => {
     const editor = wrapper.querySelector(EDITOR_SELECTOR);
     if (!editor) return false;
 
-    editor.focus();
     editor.innerHTML = draft.html;
 
     editor.dispatchEvent(
@@ -171,8 +184,9 @@
         data: null,
       }),
     );
-
     editor.dispatchEvent(new Event('change', { bubbles: true }));
+
+    focusEditorAtEnd(editor);
     scheduleSave(editor);
 
     return true;
@@ -182,36 +196,30 @@
     const wrapper = getDescriptionWrapper();
     if (!wrapper) return;
 
-    const editor = wrapper.querySelector(EDITOR_SELECTOR);
-    if (!editor) return;
-
-    const preview = wrapper.querySelector(PREVIEW_SELECTOR);
-    const editorContainer = editor.closest('[data-class="AttributeTextEditor__hidden_2"]');
-    const editorIsHidden = editorContainer?.className?.includes('__hidden_') ?? false;
-
-    if (editorIsHidden && preview) {
-      preview.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    }
-
     window.setTimeout(() => {
       const currentWrapper = getDescriptionWrapper();
       if (!currentWrapper) return;
 
       if (applyDraftToEditor(currentWrapper, draft)) {
         removeNotice();
+
+        const editor = currentWrapper.querySelector(EDITOR_SELECTOR);
+        if (editor) {
+          window.requestAnimationFrame(() => focusEditorAtEnd(editor));
+        }
       }
-    }, editorIsHidden ? 100 : 0);
+    }, 0);
   };
 
-  const showRecoveryNotice = (draft) => {
-    if (document.getElementById(NOTICE_ID) || !document.body) return;
+  const showRecoveryNotice = (draft, wrapper) => {
+    if (document.getElementById(NOTICE_ID)) return;
 
     const notice = document.createElement('div');
     notice.id = NOTICE_ID;
     notice.innerHTML = `
       <div class="jaga-draft__content">
         <strong>Найден черновик описания</strong>
-        <span>${escapeHtml(formatDraftTime(draft.updatedAt))}</span>
+        <span>Сохранён ${escapeHtml(formatDraftTime(draft.updatedAt))}</span>
       </div>
       <div class="jaga-draft__actions">
         <button type="button" data-action="restore">Восстановить</button>
@@ -219,26 +227,31 @@
       </div>
     `;
 
-    notice.querySelector('[data-action="restore"]').addEventListener('click', () => {
+    notice.querySelector('[data-action="restore"]').addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       restoreDraft(draft);
     });
 
-    notice.querySelector('[data-action="remove"]').addEventListener('click', async () => {
+    notice.querySelector('[data-action="remove"]').addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       await removeDraft(draft.key);
       removeNotice();
+
+      const editor = getDescriptionEditor();
+      if (editor) focusEditorAtEnd(editor);
     });
 
-    document.body.appendChild(notice);
+    wrapper.appendChild(notice);
   };
 
   const checkForRecoverableDraft = async () => {
+    const wrapper = getDescriptionWrapper();
     const editor = getDescriptionEditor();
     const identity = getDraftIdentity();
 
-    if (!editor || !identity) {
-      removeNotice();
-      return;
-    }
+    if (!wrapper || !editor || !identity) return;
 
     const drafts = await getDrafts();
     const draft = drafts.find((item) => item.key === identity.key);
@@ -254,11 +267,32 @@
       return;
     }
 
-    showRecoveryNotice(draft);
+    showRecoveryNotice(draft, wrapper);
   };
 
   const bindEditor = () => {
+    const wrapper = getDescriptionWrapper();
     const editor = getDescriptionEditor();
+
+    if (observedWrapper !== wrapper) {
+      if (observedWrapper && wrapperClickHandler) {
+        observedWrapper.removeEventListener('click', wrapperClickHandler, true);
+      }
+
+      observedWrapper = wrapper;
+      wrapperClickHandler = null;
+
+      if (wrapper) {
+        wrapperClickHandler = () => {
+          window.setTimeout(() => {
+            bindEditor();
+            checkForRecoverableDraft();
+          }, 0);
+        };
+
+        wrapper.addEventListener('click', wrapperClickHandler, true);
+      }
+    }
 
     if (editor === observedEditor) return;
 
@@ -273,8 +307,6 @@
 
     inputHandler = () => scheduleSave(editor);
     editor.addEventListener('input', inputHandler);
-
-    checkForRecoverableDraft();
   };
 
   const handleRouteChange = async () => {
@@ -294,6 +326,7 @@
     }
 
     observedEditor = null;
+    observedWrapper = null;
     bindEditor();
   };
 
@@ -304,19 +337,17 @@
     style.id = STYLE_ID;
     style.textContent = `
       #${NOTICE_ID} {
-        position: fixed;
-        right: 24px;
-        bottom: 84px;
-        z-index: 999999;
-        width: 320px;
-        padding: 14px;
+        width: min(100%, 420px);
+        margin-top: 8px;
+        padding: 12px;
         display: flex;
-        flex-direction: column;
+        align-items: center;
+        justify-content: space-between;
         gap: 12px;
-        background: #fff;
-        border: 1px solid rgba(16, 24, 40, 0.12);
-        border-radius: 12px;
-        box-shadow: 0 10px 32px rgba(16, 24, 40, 0.18);
+        background: rgba(249, 250, 251, 1);
+        border: 1px solid rgba(208, 212, 220, 1);
+        border-radius: 8px;
+        box-sizing: border-box;
         color: rgba(16, 24, 40, 1);
         font-family: Inter, Arial, sans-serif;
         font-size: 13px;
@@ -324,6 +355,7 @@
       }
 
       #${NOTICE_ID} .jaga-draft__content {
+        min-width: 0;
         display: flex;
         flex-direction: column;
         gap: 2px;
@@ -334,6 +366,7 @@
       }
 
       #${NOTICE_ID} .jaga-draft__actions {
+        flex-shrink: 0;
         display: flex;
         gap: 8px;
       }
