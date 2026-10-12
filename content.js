@@ -190,8 +190,22 @@
     chrome.storage.local.set({ [STORAGE_KEY]: nextHidden });
   });
 
+  // Яга динамически перестраивает DOM. Здесь нельзя вызывать полный syncPageState():
+  // renderButton() меняет innerHTML кнопки и сам создаёт новую DOM-мутацию,
+  // что приводило к бесконечному циклу MutationObserver -> renderButton -> MutationObserver.
   const observer = new MutationObserver(() => {
-    syncPageState();
+    if (!isTaskPage()) return;
+
+    if (commentsHidden) {
+      applyThirdAttributeWrapper();
+    }
+
+    // Если React удалил кнопку при перестроении страницы, возвращаем её.
+    // Перерисовываем только перед повторным mount, а не на каждую мутацию страницы.
+    if (!document.getElementById(WIDGET_ID)) {
+      renderButton();
+      mountButton();
+    }
   });
 
   observer.observe(document.documentElement, {
