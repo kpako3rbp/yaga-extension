@@ -51,8 +51,8 @@
 
     #${WIDGET_ID} {
       position: fixed;
-      right: 24px;
-      bottom: 24px;
+      right: 18px;
+      bottom: 60px;
       z-index: 999999;
       width: 48px;
       height: 48px;
